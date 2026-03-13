@@ -76,6 +76,20 @@ fn print_detail(c: &Counts) {
     );
     println!();
     println!("assert calls:           {:>6}", c.assert_count);
+    println!("assume calls:           {:>6}", c.assume_count);
+    println!("admit calls:            {:>6}", c.admit_count);
+    if c.assume_count > 0 {
+        eprintln!(
+            "WARNING: {} assume() call(s) found — assume is unsound and bypasses verification",
+            c.assume_count
+        );
+    }
+    if c.admit_count > 0 {
+        eprintln!(
+            "WARNING: {} admit() call(s) found — admit marks unfinished proofs and is unsound",
+            c.admit_count
+        );
+    }
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────────
@@ -365,6 +379,224 @@ verus! {
         assert!(c.spec_fn_unreferenced > 0);
     }
 
+    // ── assert counted as proof ───────────────────────────────────────────────
+
+    #[test]
+    fn test_assert_in_exec_counts_as_proof() {
+        // assert(...) in exec fn body → 1 proof line, not exec
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) {
+        assert(n > 0);
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.proof_block > 0, "assert line should count as proof: {:?}", c);
+    }
+
+    #[test]
+    fn test_assert_by_inline_counts_as_proof() {
+        // assert(...) by (call) → 1 proof line
+        let src = r#"
+verus! {
+    proof fn lemma(n: int) ensures n >= 0 {}
+
+    exec fn foo(n: u32) {
+        assert(n as int >= 0) by (lemma(n as int));
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.proof_block > 0, "assert by (call) should count as proof: {:?}", c);
+    }
+
+    #[test]
+    fn test_assert_by_block_all_proof() {
+        // assert(...) by { ... } → ALL lines from assert to } are proof
+        let src = r#"
+verus! {
+    proof fn lemma(n: int) ensures n >= 0 {}
+
+    exec fn foo(n: u32) {
+        assert(n as int >= 0) by {
+            lemma(n as int);
+        };
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        // assert line + lemma line + }; line = 3 proof lines minimum
+        assert!(c.proof_block >= 3, "assert by block should be all proof lines: {:?}", c);
+    }
+
+    #[test]
+    fn test_multiline_assert_condition_all_proof() {
+        // assert condition spanning multiple lines → all lines proof
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) {
+        assert(
+            n > 0
+        );
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        // assert( + n > 0 + ); = 3 proof lines
+        assert!(c.proof_block >= 3, "multi-line assert should all be proof: {:?}", c);
+    }
+
+    #[test]
+    fn test_assert_not_counted_as_exec() {
+        // assert lines must NOT be counted as exec
+        let src_no_assert = r#"
+verus! {
+    exec fn foo(n: u32) {
+    }
+}
+"#;
+        let src_with_assert = r#"
+verus! {
+    exec fn foo(n: u32) {
+        assert(n > 0);
+    }
+}
+"#;
+        let c0 = analyze_source(src_no_assert, &HashSet::new());
+        let c1 = analyze_source(src_with_assert, &HashSet::new());
+        assert!(c1.proof_block > c0.proof_block, "assert should increase proof count");
+        assert_eq!(c1.exec, c0.exec, "assert should not add to exec: {:?}", c1);
+    }
+
+    #[test]
+    fn test_assert_by_block_proof_fn_reachable() {
+        // proof fn called from assert_by block should be reachable
+        let src = r#"
+verus! {
+    proof fn lemma(n: int) ensures n >= 0 {}
+
+    exec fn foo(n: u32) {
+        assert(n as int >= 0) by {
+            lemma(n as int);
+        };
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.proof_fn_reachable > 0, "lemma should be reachable from assert_by block: {:?}", c);
+        assert_eq!(c.proof_fn_unreferenced, 0);
+    }
+
+    #[test]
+    fn test_assert_spec_fn_still_reachable() {
+        // spec fn inside assert(...) should still be spec-reachable
+        let src = r#"
+verus! {
+    spec fn valid(n: int) -> bool { n >= 0 }
+
+    exec fn foo(n: u32) {
+        assert(valid(n as int));
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_fn_reachable > 0, "spec fn in assert should remain reachable: {:?}", c);
+    }
+
+    // ── assume counted as proof + warning ────────────────────────────────────
+
+    #[test]
+    fn test_assume_counts_as_proof() {
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) {
+        assume(n > 0);
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.proof_block > 0, "assume should count as proof: {:?}", c);
+        assert_eq!(c.assume_count, 1, "assume_count should be 1: {:?}", c);
+    }
+
+    #[test]
+    fn test_assume_not_counted_as_exec() {
+        let src_no_assume = r#"
+verus! {
+    exec fn foo(n: u32) {
+    }
+}
+"#;
+        let src_with_assume = r#"
+verus! {
+    exec fn foo(n: u32) {
+        assume(n > 0);
+    }
+}
+"#;
+        let c0 = analyze_source(src_no_assume, &HashSet::new());
+        let c1 = analyze_source(src_with_assume, &HashSet::new());
+        assert!(c1.proof_block > c0.proof_block, "assume should increase proof count");
+        assert_eq!(c1.exec, c0.exec, "assume should not add to exec: {:?}", c1);
+    }
+
+    #[test]
+    fn test_admit_counts_as_proof() {
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) {
+        admit();
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.proof_block > 0, "admit should count as proof: {:?}", c);
+        assert_eq!(c.admit_count, 1, "admit_count should be 1: {:?}", c);
+        assert_eq!(c.assume_count, 0);
+    }
+
+    #[test]
+    fn test_admit_not_counted_as_exec() {
+        let src_no_admit = r#"
+verus! {
+    exec fn foo(n: u32) {
+    }
+}
+"#;
+        let src_with_admit = r#"
+verus! {
+    exec fn foo(n: u32) {
+        admit();
+    }
+}
+"#;
+        let c0 = analyze_source(src_no_admit, &HashSet::new());
+        let c1 = analyze_source(src_with_admit, &HashSet::new());
+        assert!(c1.proof_block > c0.proof_block);
+        assert_eq!(c1.exec, c0.exec, "admit should not add to exec: {:?}", c1);
+    }
+
+    #[test]
+    fn test_assume_count_zero_when_absent() {
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) {
+        assert(n > 0);
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert_eq!(c.assume_count, 0, "no assume should give assume_count=0: {:?}", c);
+    }
+
     // ── classify.rs path coverage ────────────────────────────────────────────
 
     #[test]
@@ -532,5 +764,171 @@ verus! {
         c.blank = 1;
         assert_eq!(c.total(), 17);
         print_detail(&c); // should not panic
+    }
+
+    // ── Loop invariant/decreases as spec ─────────────────────────────────────
+
+    #[test]
+    fn test_loop_invariant_is_spec() {
+        let src = r#"
+verus! {
+    exec fn foo(mut n: u32) {
+        while n > 0
+            invariant n < 100
+        {
+            n = n - 1;
+        }
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_req_ens >= 1, "loop invariant should be spec_req_ens: {:?}", c);
+    }
+
+    #[test]
+    fn test_loop_decreases_is_spec() {
+        let src = r#"
+verus! {
+    exec fn foo(mut n: u32) {
+        while n > 0
+            decreases n
+        {
+            n = n - 1;
+        }
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_req_ens >= 1, "loop decreases should be spec_req_ens: {:?}", c);
+    }
+
+    #[test]
+    fn test_loop_invariant_not_exec() {
+        // Both snippets have the same brace layout so exec line counts are comparable.
+        let src_no_inv = r#"
+verus! {
+    exec fn foo(mut n: u32) {
+        while n > 0
+        {
+            n = n - 1;
+        }
+    }
+}
+"#;
+        let src_with_inv = r#"
+verus! {
+    exec fn foo(mut n: u32) {
+        while n > 0
+            invariant n < 100
+        {
+            n = n - 1;
+        }
+    }
+}
+"#;
+        let c0 = analyze_source(src_no_inv, &HashSet::new());
+        let c1 = analyze_source(src_with_inv, &HashSet::new());
+        assert!(c1.spec_req_ens > c0.spec_req_ens, "invariant should increase spec_req_ens");
+        assert_eq!(c1.exec, c0.exec, "invariant should not add to exec: c0={:?} c1={:?}", c0, c1);
+    }
+
+    #[test]
+    fn test_fn_sig_decreases_regression() {
+        // decreases in fn signature (pending.is_some()) must still count as spec_req_ens
+        let src = r#"
+verus! {
+    spec fn foo(n: int) -> int
+        decreases n
+    {
+        if n <= 0 { 0 } else { foo(n - 1) }
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_req_ens >= 1, "fn sig decreases should be spec_req_ens: {:?}", c);
+    }
+
+    // ── calc! { } as proof block ──────────────────────────────────────────────
+
+    #[test]
+    fn test_calc_block_is_proof() {
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) {
+        calc! {
+            (==)
+            n + 0;
+            {}
+            n;
+        };
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.proof_block > 0, "calc! block should count as proof: {:?}", c);
+    }
+
+    #[test]
+    fn test_calc_block_not_exec() {
+        let src_no_calc = r#"
+verus! {
+    exec fn foo(n: u32) {
+        let x = n;
+    }
+}
+"#;
+        let src_with_calc = r#"
+verus! {
+    exec fn foo(n: u32) {
+        calc! {
+            (==)
+            n + 0;
+            {}
+            n;
+        };
+        let x = n;
+    }
+}
+"#;
+        let c0 = analyze_source(src_no_calc, &HashSet::new());
+        let c1 = analyze_source(src_with_calc, &HashSet::new());
+        assert!(c1.proof_block > c0.proof_block, "calc! should increase proof_block");
+        assert_eq!(c1.exec, c0.exec, "calc! should not add to exec: c0={:?} c1={:?}", c0, c1);
+    }
+
+    #[test]
+    fn test_calc_block_single_line() {
+        // calc! { } on one line — should not panic
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) {
+        calc! { (==) n; {} n; };
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.total() > 0, "single-line calc! should produce counts without panic: {:?}", c);
+    }
+
+    #[test]
+    fn test_calc_in_proof_fn_stays_proof_fn() {
+        // Inside a proof fn, calc! lines should count as proof_fn_* not proof_block
+        let src = r#"
+verus! {
+    proof fn foo(n: u32) {
+        calc! {
+            (==)
+            n + 0;
+            {}
+            n;
+        };
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(
+            c.proof_fn_reachable > 0 || c.proof_fn_unreferenced > 0,
+            "proof fn with calc! should count as proof_fn: {:?}", c
+        );
     }
 }

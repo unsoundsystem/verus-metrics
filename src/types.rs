@@ -45,6 +45,8 @@ pub struct Counts {
     pub comment: usize,
     pub blank: usize,
     pub assert_count: usize,
+    pub assume_count: usize,
+    pub admit_count: usize,
 }
 
 impl Counts {
@@ -68,5 +70,7 @@ impl Counts {
         self.comment += other.comment;
         self.blank += other.blank;
         self.assert_count += other.assert_count;
+        self.assume_count += other.assume_count;
+        self.admit_count += other.admit_count;
     }
 }

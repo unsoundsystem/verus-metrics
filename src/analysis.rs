@@ -44,12 +44,15 @@ pub fn analyze_crate(sources: &[&str], roots: &HashSet<String>) -> CrateAnalysis
 
     for (file_idx, annos) in all_annos.iter().enumerate() {
         let mut c = tally(annos, &all_fns, &spec_reach, &proof_reach);
-        c.assert_count = sources[file_idx]
+        let non_trivial: Vec<&str> = sources[file_idx]
             .lines()
             .zip(annos.iter())
             .filter(|(_, anno)| !matches!(anno, LineAnno::Blank | LineAnno::Comment))
-            .map(|(line, _)| count_asserts_in_line(line))
-            .sum();
+            .map(|(line, _)| line)
+            .collect();
+        c.assert_count = non_trivial.iter().map(|l| count_asserts_in_line(l)).sum();
+        c.assume_count = non_trivial.iter().map(|l| count_assumes_in_line(l)).sum();
+        c.admit_count = non_trivial.iter().map(|l| count_admits_in_line(l)).sum();
         total.add(&c);
         per_file.push(c);
     }
@@ -163,9 +166,8 @@ pub fn tally(
     c
 }
 
-/// Count assert/assert_by/assert_forall_by calls on a single (non-comment) line.
-fn count_asserts_in_line(line: &str) -> usize {
-    const ASSERT_NAMES: &[&str] = &["assert", "assert_by", "assert_forall_by"];
+/// Count occurrences of `name(` for each name in `names` on a single line.
+fn count_calls_of(line: &str, names: &[&str]) -> usize {
     let chars: Vec<char> = line.chars().collect();
     let n = chars.len();
     let mut count = 0;
@@ -182,7 +184,7 @@ fn count_asserts_in_line(line: &str) -> usize {
             }
             if j < n && chars[j] == '(' {
                 let name: String = chars[start..i].iter().collect();
-                if ASSERT_NAMES.contains(&name.as_str()) {
+                if names.contains(&name.as_str()) {
                     count += 1;
                 }
             }
@@ -193,16 +195,31 @@ fn count_asserts_in_line(line: &str) -> usize {
     count
 }
 
+fn count_asserts_in_line(line: &str) -> usize {
+    count_calls_of(line, &["assert", "assert_by", "assert_forall_by"])
+}
+
+fn count_assumes_in_line(line: &str) -> usize {
+    count_calls_of(line, &["assume"])
+}
+
+fn count_admits_in_line(line: &str) -> usize {
+    count_calls_of(line, &["admit"])
+}
+
 pub fn analyze_source(source: &str, roots: &HashSet<String>) -> Counts {
     let (annos, fns) = parse_file(source);
     let (spec_reach, proof_reach) = compute_reachability(&fns, roots);
     let mut counts = tally(&annos, &fns, &spec_reach, &proof_reach);
-    counts.assert_count = source
+    let non_trivial: Vec<&str> = source
         .lines()
         .zip(annos.iter())
         .filter(|(_, anno)| !matches!(anno, LineAnno::Blank | LineAnno::Comment))
-        .map(|(line, _)| count_asserts_in_line(line))
-        .sum();
+        .map(|(line, _)| line)
+        .collect();
+    counts.assert_count = non_trivial.iter().map(|l| count_asserts_in_line(l)).sum();
+    counts.assume_count = non_trivial.iter().map(|l| count_assumes_in_line(l)).sum();
+    counts.admit_count = non_trivial.iter().map(|l| count_admits_in_line(l)).sum();
     counts
 }
 

@@ -21,6 +21,11 @@ pub struct State {
     pub raw_string_hashes: Option<usize>,
     /// verus_depth at entry of current proof{} block (None = not in one)
     pub proof_block_depth: Option<i32>,
+    /// true when inside an assert/assert_by/assert_forall_by statement in exec context,
+    /// before it resolves to `;` or `by { }`
+    pub in_assert_stmt: bool,
+    /// paren depth within the current assert condition (0 = condition closed)
+    pub assert_paren_depth: i32,
 }
 
 impl State {
@@ -34,6 +39,8 @@ impl State {
             in_string: false,
             raw_string_hashes: None,
             proof_block_depth: None,
+            in_assert_stmt: false,
+            assert_paren_depth: 0,
         }
     }
 
@@ -92,7 +99,7 @@ pub fn extract_calls(line: &str) -> Vec<String> {
 /// Extract function calls from *inside* assert / assert_by / assert_forall_by
 /// argument lists on a single line, ignoring everything outside those expressions.
 pub fn extract_assert_spec_calls(line: &str) -> Vec<String> {
-    const ASSERT_KWS: &[&str] = &["assert_forall_by", "assert_by", "assert"];
+    const ASSERT_KWS: &[&str] = &["assert_forall_by", "assert_by", "assert", "assume", "admit"];
     let chars: Vec<char> = line.chars().collect();
     let n = chars.len();
     let mut calls = Vec::new();
@@ -203,6 +210,8 @@ pub fn parse_file(source: &str) -> (Vec<LineAnno>, Vec<FnInfo>) {
             }
             LineAnno::ProofBlk(Some(idx)) => {
                 fns[*idx].proof_blk_calls.extend(extract_calls(line));
+                // assert expressions in proof context can also reference spec fns
+                fns[*idx].exec_assert_calls.extend(extract_assert_spec_calls(line));
             }
             LineAnno::FnLine(idx) => {
                 match fns.get(*idx).map(|f| f.mode) {
@@ -300,5 +309,78 @@ mod tests {
         // No assert call → empty result.
         let calls = extract_assert_spec_calls("let x = foo(n);");
         assert!(calls.is_empty());
+    }
+
+    // ── Function definition variant tests ─────────────────────────────────────
+
+    #[test]
+    fn test_pub_spec_fn() {
+        let src = "verus! {\n    pub spec fn foo(n: int) -> bool {\n        n > 0\n    }\n}\n";
+        let (annos, fns) = parse_file(src);
+        assert!(fns.iter().any(|f| f.name == "foo" && f.mode == Mode::Spec));
+        let _ = annos;
+    }
+
+    #[test]
+    fn test_pub_open_spec_fn() {
+        let src = "verus! {\n    pub open spec fn foo(n: int) -> bool {\n        n > 0\n    }\n}\n";
+        let (annos, fns) = parse_file(src);
+        assert!(fns.iter().any(|f| f.name == "foo" && f.mode == Mode::Spec));
+        let _ = annos;
+    }
+
+    #[test]
+    fn test_pub_closed_spec_fn() {
+        let src = "verus! {\n    pub closed spec fn foo(n: int) -> bool {\n        n > 0\n    }\n}\n";
+        let (annos, fns) = parse_file(src);
+        assert!(fns.iter().any(|f| f.name == "foo" && f.mode == Mode::Spec));
+        let _ = annos;
+    }
+
+    #[test]
+    fn test_broadcast_proof_fn() {
+        let src = "verus! {\n    broadcast proof fn foo(n: int)\n        ensures n >= 0\n    {}\n}\n";
+        let (annos, fns) = parse_file(src);
+        assert!(fns.iter().any(|f| f.name == "foo" && f.mode == Mode::Proof));
+        let _ = annos;
+    }
+
+    #[test]
+    fn test_pub_crate_spec_fn() {
+        let src = "verus! {\n    pub(crate) spec fn foo(n: int) -> bool {\n        n > 0\n    }\n}\n";
+        let (annos, fns) = parse_file(src);
+        assert!(fns.iter().any(|f| f.name == "foo" && f.mode == Mode::Spec));
+        let _ = annos;
+    }
+
+    #[test]
+    fn test_impl_block_proof_method() {
+        let src = "verus! {\n    impl Foo {\n        proof fn bar(&self) {}\n    }\n}\n";
+        let (annos, fns) = parse_file(src);
+        assert!(fns.iter().any(|f| f.name == "bar" && f.mode == Mode::Proof));
+        let _ = annos;
+    }
+
+    #[test]
+    fn test_uninterp_spec_fn_no_stale_pending() {
+        // The line after `uninterp spec fn foo();` must NOT be classified as ReqEns.
+        // Before the fix, state.pending bled into the next line.
+        let src = concat!(
+            "verus! {\n",
+            "    uninterp spec fn foo();\n",
+            "    exec fn bar() {\n",
+            "        let x = 1u32;\n",
+            "    }\n",
+            "}\n",
+        );
+        let (annos, _fns) = parse_file(src);
+        // Line index 2 (0-based) is `    exec fn bar() {`
+        // It must not be ReqEns
+        for (i, anno) in annos.iter().enumerate() {
+            if let LineAnno::ReqEns(_) = anno {
+                // Only valid ReqEns lines should appear — none in this snippet
+                panic!("Line {} was unexpectedly classified as ReqEns: {:?}", i, anno);
+            }
+        }
     }
 }

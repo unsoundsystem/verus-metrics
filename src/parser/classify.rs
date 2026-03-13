@@ -29,6 +29,21 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
         return LineAnno::ReqEns(fn_idx);
     }
 
+    // Loop-body invariant/decreases → spec regardless of pending
+    let is_loop_spec = state.in_verus
+        && state.pending.is_none()
+        && !state.is_in_proof_block()
+        && state.current_mode() == Mode::Exec
+        && state.current_fn_idx().is_some()
+        && (trimmed.starts_with("invariant")
+            || trimmed.starts_with("decreases"));
+
+    if is_loop_spec {
+        let fn_idx = state.current_fn_idx().unwrap();
+        scan_comment_state(trimmed, state);
+        return LineAnno::ReqEns(fn_idx);
+    }
+
     let chars: Vec<char> = trimmed.chars().collect();
     let len = chars.len();
     let mut i = 0;
@@ -37,6 +52,10 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
     // Track the fn context active during this line (even if it opens+closes on same line)
     let mut line_fn_idx: Option<usize> = state.current_fn_idx();
     let mut line_had_proof_blk = false;
+    // Continuation of a multi-line assert statement → whole line is proof
+    if state.in_assert_stmt {
+        line_had_proof_blk = true;
+    }
 
     while i < len {
         // ── Block comment ──
@@ -240,6 +259,24 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
             }
         }
 
+        // calc! { } macro inside exec fn body → proof block
+        // Note: calc! with { on the next line is not supported (same limitation as proof {})
+        if rest.starts_with("calc!")
+            && state.current_mode() == Mode::Exec
+            && state.pending.is_none()
+        {
+            let suffix = &rest[5..]; // after "calc!"
+            if let Some(brace_offset) = suffix.chars().position(|c| c == '{') {
+                i += 5 + brace_offset + 1;
+                state.verus_depth += 1;
+                state.proof_block_depth = Some(state.verus_depth);
+                line_had_proof_blk = true;
+                line_fn_idx = line_fn_idx.or_else(|| state.current_fn_idx());
+                has_code = true;
+                continue;
+            }
+        }
+
         // spec { } override block
         if rest.starts_with("spec {") || rest.starts_with("spec{") {
             if state.pending.is_none() {
@@ -250,6 +287,76 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
                 has_code = true;
                 continue;
             }
+        }
+
+        // assert / assert_by / assert_forall_by in exec fn body → proof line
+        if state.current_mode() == Mode::Exec
+            && state.pending.is_none()
+            && !state.in_assert_stmt
+        {
+            const ASSERT_KWS: &[&str] = &["assert_forall_by", "assert_by", "assert", "assume", "admit"];
+            'assert_detect: for &kw in ASSERT_KWS {
+                if rest.starts_with(kw) {
+                    let after = &rest[kw.len()..];
+                    if after.trim_start().starts_with('(') {
+                        state.in_assert_stmt = true;
+                        state.assert_paren_depth = 0;
+                        line_had_proof_blk = true;
+                        line_fn_idx = line_fn_idx.or_else(|| state.current_fn_idx());
+                        i += kw.len();
+                        has_code = true;
+                        break 'assert_detect;
+                    }
+                }
+            }
+        }
+
+        // Process characters while inside an assert statement
+        if state.in_assert_stmt {
+            line_had_proof_blk = true;
+            line_fn_idx = line_fn_idx.or_else(|| state.current_fn_idx());
+            match chars[i] {
+                '(' => {
+                    state.assert_paren_depth += 1;
+                }
+                ')' => {
+                    if state.assert_paren_depth > 0 {
+                        state.assert_paren_depth -= 1;
+                    }
+                }
+                ';' if state.assert_paren_depth == 0 => {
+                    state.in_assert_stmt = false;
+                }
+                '{' => {
+                    if state.assert_paren_depth == 0 {
+                        // by { } block: treat as a proof block
+                        state.in_assert_stmt = false;
+                        state.verus_depth += 1;
+                        state.proof_block_depth = Some(state.verus_depth);
+                    } else {
+                        state.assert_paren_depth += 1;
+                    }
+                }
+                '}' => {
+                    if state.assert_paren_depth > 0 {
+                        state.assert_paren_depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+            if !chars[i].is_whitespace() {
+                has_code = true;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Bodyless fn (e.g. uninterp spec fn foo();) — clear stale pending at `;`
+        if chars[i] == ';' && state.pending.is_some() && !state.in_assert_stmt {
+            state.pending = None;
+            has_code = true;
+            i += 1;
+            continue;
         }
 
         // Brace handling
