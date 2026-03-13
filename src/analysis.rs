@@ -71,11 +71,14 @@ pub fn compute_reachability(
 
     let use_fn = |f: &FnInfo| roots.is_empty() || roots.contains(&f.name);
 
-    // Spec: seeded from req_ens_calls of root fns; follows body_calls of spec fns
+    // Spec: seeded from req_ens_calls and exec assert expressions of root fns;
+    // follows body_calls of spec fns.
     let spec_seeds: Vec<&str> = fns
         .iter()
         .filter(|f| use_fn(f))
-        .flat_map(|f| f.req_ens_calls.iter().map(|s| s.as_str()))
+        .flat_map(|f| {
+            f.req_ens_calls.iter().chain(f.exec_assert_calls.iter()).map(|s| s.as_str())
+        })
         .collect();
     let spec_reach = bfs_reach(&spec_seeds, &name_to_idx, fns, Mode::Spec);
 

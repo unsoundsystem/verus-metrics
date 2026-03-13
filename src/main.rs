@@ -298,4 +298,239 @@ verus! {
         assert!(c.comment >= 2);
         assert!(c.blank >= 1);
     }
+
+    #[test]
+    fn test_assert_in_exec_reaches_spec_fn() {
+        let src = r#"
+verus! {
+    spec fn valid(n: int) -> bool {
+        n >= 0
+    }
+
+    exec fn foo(n: u32) {
+        assert(valid(n as int));
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(
+            c.spec_fn_reachable > 0,
+            "valid should be reachable via assert: {:?}", c
+        );
+        assert_eq!(c.spec_fn_unreferenced, 0);
+    }
+
+    #[test]
+    fn test_assert_transitive_spec_reachable() {
+        // assert references derived, which calls base — both should be reachable.
+        let src = r#"
+verus! {
+    spec fn base(n: int) -> bool { n >= 0 }
+
+    spec fn derived(n: int) -> bool { base(n) && n < 100 }
+
+    exec fn foo(n: u32) {
+        assert(derived(n as int));
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(
+            c.spec_fn_reachable >= 2,
+            "both base and derived should be reachable via assert: {:?}", c
+        );
+        assert_eq!(c.spec_fn_unreferenced, 0);
+    }
+
+    #[test]
+    fn test_exec_call_outside_assert_not_spec_seed() {
+        // exec_helper is called in exec body but not inside assert — should not be
+        // incorrectly pulled into spec reachability.
+        let src = r#"
+verus! {
+    spec fn spec_helper(n: int) -> bool { n > 0 }
+
+    exec fn exec_helper(n: u32) -> u32 { n + 1 }
+
+    exec fn foo(n: u32) {
+        let m = exec_helper(n);
+        let x = m;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert_eq!(c.spec_fn_reachable, 0, "no assert means spec_helper unreachable: {:?}", c);
+        assert!(c.spec_fn_unreferenced > 0);
+    }
+
+    // ── classify.rs path coverage ────────────────────────────────────────────
+
+    #[test]
+    fn test_multiline_block_comment() {
+        // Block comment spanning multiple lines: continuation lines must be classified
+        // as Comment via the `state.in_block_comment` early-return path.
+        let src = "/* line one\n   line two\n   line three */\n";
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.comment >= 3, "all lines of multiline block comment should be Comment: {:?}", c);
+    }
+
+    #[test]
+    fn test_raw_string_inside_verus() {
+        // r#"..."# inside an exec fn body — the raw-string handling path in classify_line.
+        let src = r###"
+verus! {
+    exec fn foo() {
+        let x = r#"hello world"#;
+    }
+}
+"###;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.exec > 0, "raw string line should count as exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_normal_string_inside_verus() {
+        // "..." inside an exec fn body — the normal-string handling path.
+        let src = r#"
+verus! {
+    exec fn foo() {
+        let x = "hello";
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.exec > 0, "string literal line should count as exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_code_then_line_comment() {
+        // Code followed by // on the same line: has_code = true when // is reached,
+        // so the loop breaks with has_comment = true but still returns a code annotation.
+        let src = r#"
+verus! {
+    exec fn foo() {
+        let x = 1u32; // inline comment
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.exec > 0, "line with code + trailing comment should be exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_plain_fn_in_verus() {
+        // `fn` without mode keyword inside verus! → treated as exec.
+        let src = r#"
+verus! {
+    fn plain(n: u32) -> u32 {
+        n
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.exec > 0, "plain fn inside verus should be exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_spec_override_block() {
+        // `spec { }` override block inside exec fn — covers the spec{} path in classify.
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) -> bool {
+        spec { true }
+    }
+}
+"#;
+        // We just verify it parses without panic and produces some counts.
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.total() > 0, "spec override block should produce counts: {:?}", c);
+    }
+
+    #[test]
+    fn test_nested_braces_in_fn_body() {
+        // `{` without a fn pending (nested block) → covers the else branch in brace handling.
+        let src = r#"
+verus! {
+    exec fn foo() {
+        {
+            let x = 1u32;
+        }
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.exec > 0, "nested braces should still count as exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_req_ens_with_line_comment() {
+        // requires line followed by // → scan_comment_state line-comment path.
+        let src = r#"
+verus! {
+    exec fn foo(n: u32)
+        requires n > 0 // must be positive
+    {
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_req_ens >= 1, "requires line should be spec: {:?}", c);
+    }
+
+    #[test]
+    fn test_req_ens_with_block_comment() {
+        // requires line with /* ... */ → scan_comment_state block-comment path.
+        let src = r#"
+verus! {
+    exec fn foo(n: u32)
+        requires /* pre */ n > 0
+    {
+        let x = n;
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_req_ens >= 1, "requires line with block comment should be spec: {:?}", c);
+    }
+
+    // ── print_row / print_detail / Counts::total ─────────────────────────────
+
+    #[test]
+    fn test_print_row_no_panic() {
+        let mut c = Counts::default();
+        c.exec = 10;
+        c.spec_req_ens = 3;
+        c.proof_fn_reachable = 2;
+        c.comment = 1;
+        c.blank = 1;
+        // Verify total() is consistent before printing.
+        assert_eq!(c.total(), 17);
+        // Should not panic.
+        print_row("test_label", &c);
+    }
+
+    #[test]
+    fn test_print_detail_zero_code() {
+        // When code == 0, print_detail should return early without panic.
+        let c = Counts::default();
+        print_detail(&c); // should not panic
+    }
+
+    #[test]
+    fn test_print_detail_with_counts() {
+        let mut c = Counts::default();
+        c.exec = 5;
+        c.spec_req_ens = 2;
+        c.spec_fn_reachable = 3;
+        c.proof_block = 1;
+        c.proof_fn_reachable = 4;
+        c.assert_count = 2;
+        c.comment = 1;
+        c.blank = 1;
+        assert_eq!(c.total(), 17);
+        print_detail(&c); // should not panic
+    }
 }

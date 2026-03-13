@@ -15,6 +15,8 @@ pub struct FnInfo {
     pub req_ens_calls: Vec<String>,
     pub proof_blk_calls: Vec<String>,
     pub body_calls: Vec<String>,
+    /// Calls found inside assert/assert_by/assert_forall_by expressions in exec fn bodies.
+    pub exec_assert_calls: Vec<String>,
 }
 
 // ─── Per-line annotation ──────────────────────────────────────────────────────
