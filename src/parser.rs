@@ -26,6 +26,10 @@ pub struct State {
     pub in_assert_stmt: bool,
     /// paren depth within the current assert condition (0 = condition closed)
     pub assert_paren_depth: i32,
+    /// Paren depth inside a multi-line requires/ensures clause (e.g. `ensures ({...})`).
+    /// While > 0, continuation lines are classified as ReqEns and braces are NOT counted
+    /// in verus_depth (they are spec-expression braces, not fn-body boundaries).
+    pub req_ens_paren_depth: i32,
 }
 
 impl State {
@@ -41,6 +45,7 @@ impl State {
             proof_block_depth: None,
             in_assert_stmt: false,
             assert_paren_depth: 0,
+            req_ens_paren_depth: 0,
         }
     }
 

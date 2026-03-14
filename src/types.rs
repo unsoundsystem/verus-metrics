@@ -26,6 +26,9 @@ pub enum LineAnno {
     Blank,
     Comment,
     Exec,
+    /// Code outside `verus! { }` (use imports, module declarations, etc.) or the
+    /// verus! delimiter lines themselves.  Not counted in any metric.
+    NonVerus,
     ReqEns(usize),
     ProofBlk(Option<usize>),
     FnLine(usize),

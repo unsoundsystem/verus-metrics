@@ -3,6 +3,9 @@ use super::{Pending, State, scan_comment_state};
 
 pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> LineAnno {
     let trimmed = line.trim();
+    // Capture whether we started this line inside verus! (used at the end to classify
+    // top-level non-fn-body lines and the verus! delimiter itself).
+    let started_in_verus = state.in_verus;
     if trimmed.is_empty() {
         return LineAnno::Blank;
     }
@@ -25,6 +28,40 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
 
     if is_req_ens {
         let fn_idx = state.pending.as_ref().unwrap().fn_idx;
+        // Count paren depth to detect multi-line req/ens clauses like `ensures ({...})`.
+        // Braces inside the clause are spec-expression braces, not fn-body boundaries,
+        // so we do NOT update verus_depth here.
+        for c in trimmed.chars() {
+            match c {
+                '(' => state.req_ens_paren_depth += 1,
+                ')' => {
+                    if state.req_ens_paren_depth > 0 {
+                        state.req_ens_paren_depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        scan_comment_state(trimmed, state);
+        return LineAnno::ReqEns(fn_idx);
+    }
+
+    // Continuation of a multi-line req/ens clause (e.g. lines inside `ensures ({...})`).
+    // While req_ens_paren_depth > 0 we are still inside the clause expression; braces here
+    // are spec-level braces and must NOT be counted in verus_depth or consume pending.
+    if state.in_verus && state.pending.is_some() && state.req_ens_paren_depth > 0 {
+        let fn_idx = state.pending.as_ref().unwrap().fn_idx;
+        for c in trimmed.chars() {
+            match c {
+                '(' => state.req_ens_paren_depth += 1,
+                ')' => {
+                    if state.req_ens_paren_depth > 0 {
+                        state.req_ens_paren_depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
         scan_comment_state(trimmed, state);
         return LineAnno::ReqEns(fn_idx);
     }
@@ -359,6 +396,20 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
             continue;
         }
 
+        // broadcast group { } — Verus mechanism for grouping broadcast lemmas → proof block
+        if (rest.starts_with("broadcast group") || rest.starts_with("group "))
+            && state.pending.is_none()
+        {
+            if let Some(brace_offset) = rest.chars().position(|c| c == '{') {
+                i += brace_offset + 1;
+                state.verus_depth += 1;
+                state.proof_block_depth = Some(state.verus_depth);
+                line_had_proof_blk = true;
+                has_code = true;
+                continue;
+            }
+        }
+
         // Brace handling
         match chars[i] {
             '{' => {
@@ -400,7 +451,9 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
     }
 
     if !state.in_verus {
-        return LineAnno::Exec;
+        // Either a line that was always outside verus! (use imports, module decls, etc.)
+        // or the closing `}` of the verus! block.  Neither is counted as exec.
+        return LineAnno::NonVerus;
     }
 
     if line_had_proof_blk || state.is_in_proof_block() {
@@ -414,6 +467,17 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
 
     match line_fn_idx.or_else(|| state.current_fn_idx()) {
         Some(idx) => LineAnno::FnLine(idx),
-        None => LineAnno::Exec,
+        None => {
+            // Inside verus! but not in any fn body: top-level type/impl declarations.
+            // Only `struct` definitions are counted as exec (they define exec-mode data types).
+            // Everything else (enum, impl wrappers, use inside verus!, etc.) is NonVerus.
+            if started_in_verus
+                && trimmed.split_whitespace().any(|w| w == "struct")
+            {
+                LineAnno::Exec
+            } else {
+                LineAnno::NonVerus
+            }
+        }
     }
 }

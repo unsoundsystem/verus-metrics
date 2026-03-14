@@ -47,7 +47,7 @@ pub fn analyze_crate(sources: &[&str], roots: &HashSet<String>) -> CrateAnalysis
         let non_trivial: Vec<&str> = sources[file_idx]
             .lines()
             .zip(annos.iter())
-            .filter(|(_, anno)| !matches!(anno, LineAnno::Blank | LineAnno::Comment))
+            .filter(|(_, anno)| !matches!(anno, LineAnno::Blank | LineAnno::Comment | LineAnno::NonVerus))
             .map(|(line, _)| line)
             .collect();
         c.assert_count = non_trivial.iter().map(|l| count_asserts_in_line(l)).sum();
@@ -71,6 +71,15 @@ pub fn compute_reachability(
         .enumerate()
         .map(|(i, f)| (f.name.as_str(), i))
         .collect();
+
+    // Warn about --roots names that don't match any function in the analysed code.
+    if !roots.is_empty() {
+        for name in roots {
+            if !name_to_idx.contains_key(name.as_str()) {
+                eprintln!("warning: --roots: function '{}' not found in analysed code", name);
+            }
+        }
+    }
 
     let use_fn = |f: &FnInfo| roots.is_empty() || roots.contains(&f.name);
 
@@ -141,6 +150,7 @@ pub fn tally(
         match anno {
             LineAnno::Blank => c.blank += 1,
             LineAnno::Comment => c.comment += 1,
+            LineAnno::NonVerus => {} // not counted in any metric
             LineAnno::Exec => c.exec += 1,
             LineAnno::ReqEns(_) => c.spec_req_ens += 1,
             LineAnno::ProofBlk(_) => c.proof_block += 1,

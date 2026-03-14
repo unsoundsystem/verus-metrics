@@ -1,9 +1,11 @@
 mod analysis;
+mod mod_resolver;
 mod parser;
 mod types;
 
 use analysis::{analyze_crate, analyze_source};
 use clap::Parser as ClapParser;
+use mod_resolver::{collect_crate_files, find_crate_root};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use types::Counts;
@@ -98,7 +100,29 @@ fn main() {
     let args = Args::parse();
     let roots: HashSet<String> = args.roots.into_iter().collect();
 
-    let files: Vec<PathBuf> = if args.path.is_dir() {
+    let files: Vec<PathBuf> = if args.whole_crate {
+        if args.path.is_file() {
+            eprintln!(
+                "error: --whole-crate requires a directory, not a file: {}",
+                args.path.display()
+            );
+            std::process::exit(1);
+        }
+        let root = match find_crate_root(&args.path) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        };
+        match collect_crate_files(&root) {
+            Ok(files) => files,
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else if args.path.is_dir() {
         WalkDir::new(&args.path)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -201,10 +225,53 @@ mod tests {
 
     #[test]
     fn test_exec_outside_verus() {
+        // Code outside verus! {} is NonVerus and not counted in any metric.
         let c = analyze_source("fn add(a: u32, b: u32) -> u32 { a + b }\n", &HashSet::new());
-        assert!(c.exec > 0);
+        assert_eq!(c.exec, 0, "code outside verus! should not be counted as exec");
         assert_eq!(c.spec_total(), 0);
         assert_eq!(c.proof_total(), 0);
+    }
+
+    #[test]
+    fn test_use_imports_not_exec() {
+        // use imports before verus! must be NonVerus, not exec.
+        let src = "use vstd::prelude::*;\nuse std::collections::HashMap;\n\nverus! {\n}\n";
+        let c = analyze_source(src, &HashSet::new());
+        assert_eq!(c.exec, 0, "use imports should not be counted as exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_struct_inside_verus_is_exec() {
+        // struct definitions at the top level of verus! are exec.
+        let src = "verus! {\n    pub struct Foo(int);\n}\n";
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.exec >= 1, "struct definition inside verus! should be exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_enum_inside_verus_not_exec() {
+        // enum definitions at the top level of verus! are NonVerus (not exec).
+        let src = "verus! {\n    pub enum Bar {\n        A,\n        B,\n    }\n}\n";
+        let c = analyze_source(src, &HashSet::new());
+        assert_eq!(c.exec, 0, "enum definition should not be exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_broadcast_group_is_proof() {
+        // pub broadcast group { ... } should be classified as proof, not exec.
+        let src = r#"
+verus! {
+    proof fn lemma_a() {}
+    proof fn lemma_b() {}
+    pub broadcast group my_group {
+        lemma_a,
+        lemma_b,
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert_eq!(c.exec, 0, "broadcast group should not be exec: {:?}", c);
+        assert!(c.proof_block > 0, "broadcast group body should be proof_block: {:?}", c);
     }
 
     #[test]
@@ -908,6 +975,70 @@ verus! {
 "#;
         let c = analyze_source(src, &HashSet::new());
         assert!(c.total() > 0, "single-line calc! should produce counts without panic: {:?}", c);
+    }
+
+    #[test]
+    fn test_ensures_block_expr_not_exec() {
+        // `ensures ({...})` multi-line: the braces inside the ensures expression
+        // must NOT be counted in verus_depth.  Without the fix, the closing `})`
+        // would decrement verus_depth to 0 and flip in_verus = false, causing
+        // the entire fn body to be misclassified as exec.
+        let src = r#"
+verus! {
+    proof fn lemma(x: int)
+        ensures ({
+            if x == 0 {
+                x >= 0
+            } else {
+                x > 0 || x < 0
+            }
+        })
+    {
+        assert(x >= 0 || x < 0);
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        // The ensures clause lines (7 of them) must be spec.
+        assert!(c.spec_req_ens >= 7, "ensures block should be spec: {:?}", c);
+        // The fn body lines count as proof fn body (not proof_block, since it's a proof fn).
+        assert!(
+            c.proof_fn_reachable > 0 || c.proof_fn_unreferenced > 0,
+            "fn body should be proof fn: {:?}",
+            c
+        );
+        // The only exec lines are `verus! {` and `}` — the fn body itself must not be exec.
+        assert!(c.exec <= 2, "fn body must not be exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_ensures_block_expr_code_after_fn() {
+        // Ensure the fn AFTER a function with `ensures ({...})` is also parsed correctly.
+        let src = r#"
+verus! {
+    proof fn first(x: int)
+        ensures ({
+            x >= 0
+        })
+    {
+    }
+
+    proof fn second(y: int)
+        ensures y > 0
+    {
+        assert(y > 0);
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        // second fn body must produce proof fn lines, not exec.
+        assert!(
+            c.proof_fn_reachable > 0 || c.proof_fn_unreferenced > 0,
+            "second fn body should be proof fn: {:?}",
+            c
+        );
+        // At most 2 exec lines (verus! delimiters).
+        assert!(c.exec <= 2, "fn body must not be exec: {:?}", c);
     }
 
     #[test]
