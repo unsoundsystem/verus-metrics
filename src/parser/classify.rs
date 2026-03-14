@@ -42,28 +42,48 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
                 _ => {}
             }
         }
+        // Mark that we are now inside a req/ens clause. This handles the case where
+        // the keyword sits alone on its own line and the condition begins on the next line.
+        state.in_req_ens_clause = true;
         scan_comment_state(trimmed, state);
         return LineAnno::ReqEns(fn_idx);
     }
 
-    // Continuation of a multi-line req/ens clause (e.g. lines inside `ensures ({...})`).
-    // While req_ens_paren_depth > 0 we are still inside the clause expression; braces here
-    // are spec-level braces and must NOT be counted in verus_depth or consume pending.
-    if state.in_verus && state.pending.is_some() && state.req_ens_paren_depth > 0 {
-        let fn_idx = state.pending.as_ref().unwrap().fn_idx;
+    // Continuation of a multi-line req/ens clause.
+    // Fires when:
+    //   (a) req_ens_paren_depth > 0  — inside a block-expr clause like `ensures ({...})`
+    //   (b) in_req_ens_clause        — keyword was on a prior line with no open parens yet,
+    //                                  e.g. `ensures\n  r matches Some(...) ==> ({`
+    //
+    // Before returning ReqEns we scan for a top-level `{` (not nested inside parens).
+    // Such a `{` is the fn-body opening brace, NOT a spec-expression brace, so we must NOT
+    // swallow it here — instead we clear clause state and fall through to the char loop.
+    if state.in_verus && state.pending.is_some()
+        && (state.req_ens_paren_depth > 0 || state.in_req_ens_clause)
+    {
+        let mut depth = state.req_ens_paren_depth;
+        let mut toplevel_brace = false;
         for c in trimmed.chars() {
             match c {
-                '(' => state.req_ens_paren_depth += 1,
-                ')' => {
-                    if state.req_ens_paren_depth > 0 {
-                        state.req_ens_paren_depth -= 1;
-                    }
-                }
+                '(' => depth += 1,
+                ')' => { if depth > 0 { depth -= 1; } }
+                '{' if depth == 0 => { toplevel_brace = true; break; }
                 _ => {}
             }
         }
-        scan_comment_state(trimmed, state);
-        return LineAnno::ReqEns(fn_idx);
+        if toplevel_brace {
+            // The fn-body `{` is on this line — clear clause state and fall through so
+            // the char loop can consume `pending` normally.
+            state.req_ens_paren_depth = 0;
+            state.in_req_ens_clause = false;
+            // (fall through to char loop below)
+        } else {
+            let fn_idx = state.pending.as_ref().unwrap().fn_idx;
+            state.req_ens_paren_depth = depth;
+            // in_req_ens_clause stays true until the fn-body brace is encountered.
+            scan_comment_state(trimmed, state);
+            return LineAnno::ReqEns(fn_idx);
+        }
     }
 
     // Loop-body invariant/decreases → spec regardless of pending
@@ -414,6 +434,8 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
         match chars[i] {
             '{' => {
                 if let Some(pending) = state.pending.take() {
+                    state.in_req_ens_clause = false;
+                    state.req_ens_paren_depth = 0;
                     line_fn_idx = Some(pending.fn_idx);
                     state.mode_stack.push((pending.mode, Some(pending.fn_idx)));
                 } else {

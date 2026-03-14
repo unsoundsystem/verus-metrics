@@ -32,17 +32,31 @@ struct Args {
 
 // ─── Output ───────────────────────────────────────────────────────────────────
 
-fn print_row(label: &str, c: &Counts) {
-    println!(
-        "{:<50} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
-        label,
-        c.spec_total(),
-        c.proof_total(),
-        c.exec,
-        c.comment,
-        c.blank,
-        c.total()
-    );
+fn print_row(label: &str, c: &Counts, show_reach: bool) {
+    if show_reach {
+        println!(
+            "{:<50} {:>6} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6}",
+            label,
+            c.spec_total(),
+            c.proof_total(),
+            c.exec,
+            c.spec_fn_reachable + c.proof_fn_reachable,
+            c.comment,
+            c.blank,
+            c.total()
+        );
+    } else {
+        println!(
+            "{:<50} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
+            label,
+            c.spec_total(),
+            c.proof_total(),
+            c.exec,
+            c.comment,
+            c.blank,
+            c.total()
+        );
+    }
 }
 
 fn print_detail(c: &Counts) {
@@ -151,12 +165,21 @@ fn main() {
         std::process::exit(1);
     }
 
-    let header = || {
-        println!(
-            "{:<50} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
-            "File", "spec", "proof", "exec", "comment", "blank", "total"
-        );
-        println!("{}", "-".repeat(95));
+    let show_reach = !roots.is_empty();
+    let header = |show_reach: bool| {
+        if show_reach {
+            println!(
+                "{:<50} {:>6} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6}",
+                "File", "spec", "proof", "exec", "reach", "comment", "blank", "total"
+            );
+            println!("{}", "-".repeat(103));
+        } else {
+            println!(
+                "{:<50} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
+                "File", "spec", "proof", "exec", "comment", "blank", "total"
+            );
+            println!("{}", "-".repeat(95));
+        }
     };
 
     let short_label = |path: &PathBuf| {
@@ -170,48 +193,48 @@ fn main() {
         let result = analyze_crate(&src_strs, &roots);
 
         if args.verbose {
-            header();
+            header(show_reach);
             for (i, (path, _)) in sources.iter().enumerate() {
-                print_row(&short_label(path), &result.per_file[i]);
+                print_row(&short_label(path), &result.per_file[i], show_reach);
             }
             if sources.len() > 1 {
-                println!("{}", "-".repeat(95));
-                print_row("TOTAL", &result.total);
+                println!("{}", "-".repeat(if show_reach { 103 } else { 95 }));
+                print_row("TOTAL", &result.total, show_reach);
             }
         } else {
-            header();
+            header(show_reach);
             let label = if sources.len() == 1 {
                 short_label(&sources[0].0)
             } else {
                 "TOTAL".to_string()
             };
-            print_row(&label, &result.total);
+            print_row(&label, &result.total, show_reach);
         }
         print_detail(&result.total);
     } else {
         // Per-file analysis (original behaviour).
         let mut total = Counts::default();
         if args.verbose {
-            header();
+            header(show_reach);
         }
         for (path, source) in &sources {
             let counts = analyze_source(source, &roots);
             if args.verbose {
-                print_row(&short_label(path), &counts);
+                print_row(&short_label(path), &counts, show_reach);
             }
             total.add(&counts);
         }
         if args.verbose && sources.len() > 1 {
-            println!("{}", "-".repeat(95));
-            print_row("TOTAL", &total);
+            println!("{}", "-".repeat(if show_reach { 103 } else { 95 }));
+            print_row("TOTAL", &total, show_reach);
         } else if !args.verbose {
-            header();
+            header(show_reach);
             let label = if sources.len() == 1 {
                 short_label(&sources[0].0)
             } else {
                 "TOTAL".to_string()
             };
-            print_row(&label, &total);
+            print_row(&label, &total, show_reach);
         }
         print_detail(&total);
     }
@@ -290,6 +313,48 @@ verus! {
         assert!(c.spec_req_ens >= 2, "requires+ensures should be spec: {:?}", c);
         assert_eq!(c.spec_fn_reachable, 0);
         assert_eq!(c.spec_fn_unreferenced, 0);
+    }
+
+    #[test]
+    fn test_req_ens_keyword_alone_on_line() {
+        // `ensures` alone on its own line; condition starts on the next line.
+        // Without the fix the `{` inside the condition consumed `pending` early,
+        // leaving the real fn-body `{` unrecognised and everything after as exec.
+        let src = r#"
+verus! {
+    spec fn ok(x: int) -> bool { x >= 0 }
+
+    proof fn lemma(x: int)
+        ensures
+            ok(x)
+    {
+        assert(ok(x));
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_req_ens >= 1, "ensures line should be spec: {:?}", c);
+        assert_eq!(c.exec, 0, "fn body must not be exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_req_ens_multiline_block_expr_next_line() {
+        // `ensures\n  r matches Some(...) ==> ({...})` — the condition opens a
+        // block-expression on the continuation line.
+        let src = r#"
+verus! {
+    spec fn cond(x: int) -> bool { x > 0 }
+
+    proof fn lemma(x: int)
+        ensures
+            cond(x)
+    {
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_req_ens >= 1, "ensures continuation should be spec: {:?}", c);
+        assert_eq!(c.exec, 0, "no exec expected: {:?}", c);
     }
 
     #[test]
@@ -808,7 +873,8 @@ verus! {
         // Verify total() is consistent before printing.
         assert_eq!(c.total(), 17);
         // Should not panic.
-        print_row("test_label", &c);
+        print_row("test_label", &c, false);
+        print_row("test_label_reach", &c, true);
     }
 
     #[test]

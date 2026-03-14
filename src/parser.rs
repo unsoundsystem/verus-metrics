@@ -30,6 +30,10 @@ pub struct State {
     /// While > 0, continuation lines are classified as ReqEns and braces are NOT counted
     /// in verus_depth (they are spec-expression braces, not fn-body boundaries).
     pub req_ens_paren_depth: i32,
+    /// True after a requires/ensures/decreases keyword line until the fn-body `{` is seen.
+    /// Handles the case where the keyword is alone on its own line and the condition starts
+    /// on the next line (e.g. `ensures\n   r matches Some(...) ==> ({`).
+    pub in_req_ens_clause: bool,
 }
 
 impl State {
@@ -46,6 +50,7 @@ impl State {
             in_assert_stmt: false,
             assert_paren_depth: 0,
             req_ens_paren_depth: 0,
+            in_req_ens_clause: false,
         }
     }
 
