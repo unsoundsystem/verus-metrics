@@ -15,17 +15,17 @@ cargo install --path .
 verus-metrics [OPTIONS] <PATH>
 ```
 
-`<PATH>` can be a single `.rs` file or a directory. When a directory is given, all `.rs` files underneath it are scanned.
+`<PATH>` can be a single `.rs` file or a directory.
 
 ### Options
 
 | Option | Description |
 |---|---|
-| `-v`, `--verbose` | Show per-file line counts |
-| `--roots <fn,...>` | Comma-separated list of root functions for reachability analysis |
-| `--whole-crate` | Merge call graphs across all files for cross-file reachability analysis |
+| `-v`, `--verbose` | Show per-file line counts in addition to the total |
+| `--roots <fn,...>` | Comma-separated list of root functions; only lines reachable from these are counted in the output |
+| `--whole-crate` | Follow `mod` declarations from `lib.rs`/`main.rs` and merge call graphs across all files |
 
-### Example output
+### Example output (no `--roots`)
 
 ```
                                                     spec  proof   exec comment   blank  total
@@ -33,6 +33,8 @@ src/lib.rs                                           120     45    310      80  
 
 spec:     120 lines (21.6%)
   requires/ensures:            32
+    reachable:                 26
+    unreferenced:               6
   spec fn bodies:
     reachable:                 74
     unreferenced:              14
@@ -48,18 +50,35 @@ exec:     310 lines (55.8%)
 assert calls:                  18
 ```
 
+### Example output (with `--roots`)
+
+When `--roots` is given the column headers change to `spec*` / `proof*` and every column
+(including `total`) reflects only the lines reachable from the specified roots:
+
+```
+                                                   spec* proof*   exec comment   blank  total
+TOTAL                                               1234   5678    598     763     692   8965
+```
+
+- `spec*` = reachable `requires`/`ensures` lines + reachable `spec fn` body lines
+- `proof*` = `proof {}` block lines + reachable `proof fn` body lines
+- `exec` and `comment`/`blank` are unchanged (exec reachability is not tracked)
+- `total` = `spec*` + `proof*` + exec + comment + blank
+
 ## Line classification
 
 | Category | What is counted |
 |---|---|
-| **spec (requires/ensures)** | `requires` / `ensures` / `decreases` / `opens_invariants` / `no_unwind` lines — always counted as spec regardless of the enclosing function's mode |
-| **spec fn (reachable)** | Body lines of `spec fn`s transitively reachable from any root function's `requires`/`ensures`, `assert` expressions, or `proof {}` blocks |
+| **spec (requires/ensures)** | `requires` / `ensures` / `decreases` / `opens_invariants` / `no_unwind` lines in function signatures, plus `invariant` / `decreases` lines inside loop bodies — always counted as spec |
+| **spec fn (reachable)** | Body lines of `spec fn`s transitively reachable from root function `requires`/`ensures`, `assert` expressions, or `proof {}` blocks |
 | **spec fn (unreferenced)** | Body lines of `spec fn`s not reachable from the above |
-| **proof (proof block)** | Lines inside `proof { }` blocks within exec functions |
+| **proof (proof block)** | Lines inside `proof { }` blocks, `calc! { }` blocks, `assert_by { }` bodies, and `broadcast group { }` within exec function bodies |
 | **proof fn (reachable)** | Body lines of `proof fn`s reachable from `proof {}` blocks |
 | **proof fn (unreferenced)** | Body lines of `proof fn`s not reachable from any `proof {}` block |
-| **exec** | All other lines inside `verus! { }` |
+| **exec** | Body lines of `exec fn`s and `struct` definitions inside `verus! { }` |
 | **comment / blank** | Comment lines and blank lines |
+
+Lines outside `verus! { }` (use imports, module declarations, etc.) are not counted in any metric.
 
 ## How reachability works
 
@@ -72,10 +91,15 @@ When `--roots` is not given, every function acts as a root.
 ### Cross-file analysis (`--whole-crate`)
 
 By default each file is analysed independently.
-With `--whole-crate`, the `FnInfo` tables from all files are merged into a single global BFS, so call chains that cross file boundaries are tracked correctly.
+
+With `--whole-crate` and a directory path, the tool locates the crate root (`src/lib.rs`,
+`src/main.rs`, `lib.rs`, or `main.rs`) and collects files by following `mod` declarations —
+matching the Rust compiler's view of the crate. Only files reachable via `mod` are included;
+commented-out `mod` declarations and inline `mod { }` blocks are skipped.
+An error is reported if no crate root is found.
 
 ```sh
-# Cross-file analysis of an entire directory
+# Cross-file analysis of an entire crate
 verus-metrics --whole-crate src/
 
 # Restrict roots and analyse the whole crate

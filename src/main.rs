@@ -1175,4 +1175,115 @@ verus! {
         );
         assert!(c.spec_reachable() > 0, "should have some reachable spec lines: {:?}", c);
     }
+
+    #[test]
+    fn test_req_ens_reachable_when_spec_fn_reachable() {
+        // requires of a spec fn that IS reachable should also be reachable
+        let src = r#"
+verus! {
+    spec fn helper(x: int) -> bool
+        requires x >= 0,
+    {
+        x > 0
+    }
+    exec fn foo(x: u32)
+        requires helper(x as int),
+    {
+    }
+}
+"#;
+        let roots: HashSet<String> = ["foo".to_string()].into();
+        let c = analyze_source(src, &roots);
+        assert!(c.spec_fn_reachable > 0, "helper body reachable: {:?}", c);
+        // foo's requires + helper's requires: both should be reachable
+        assert!(c.spec_req_ens_reachable >= 2, "requires of reachable spec fn should be reachable: {:?}", c);
+        assert_eq!(c.spec_req_ens_unreachable, 0, "no unreachable req/ens: {:?}", c);
+    }
+
+    #[test]
+    fn test_req_ens_proof_fn_reachable() {
+        // requires of a proof fn reachable via proof{} block should be counted as reachable
+        let src = r#"
+verus! {
+    proof fn lemma(x: int)
+        requires x > 0,
+    {
+    }
+    exec fn foo() {
+        proof {
+            lemma(1int);
+        }
+    }
+}
+"#;
+        let roots: HashSet<String> = ["foo".to_string()].into();
+        let c = analyze_source(src, &roots);
+        assert!(c.proof_fn_reachable > 0, "lemma body should be reachable: {:?}", c);
+        assert!(c.spec_req_ens_reachable >= 1, "reachable proof fn requires should be reachable: {:?}", c);
+        assert_eq!(c.spec_req_ens_unreachable, 0, "no unreachable req/ens: {:?}", c);
+    }
+
+    #[test]
+    fn test_proof_reachable_includes_proof_block() {
+        // proof_reachable() must equal proof_block + proof_fn_reachable
+        let src = r#"
+verus! {
+    exec fn foo() {
+        proof {
+            assert(1int > 0int);
+        }
+    }
+}
+"#;
+        let roots: HashSet<String> = ["foo".to_string()].into();
+        let c = analyze_source(src, &roots);
+        assert!(c.proof_block > 0, "proof{{}} block should be counted: {:?}", c);
+        assert_eq!(
+            c.proof_reachable(),
+            c.proof_block + c.proof_fn_reachable,
+            "proof_reachable() = proof_block + proof_fn_reachable: {:?}", c
+        );
+    }
+
+    #[test]
+    fn test_total_reachable_consistency() {
+        // total_reachable() must equal spec_reachable() + proof_reachable() + exec + comment + blank
+        // and must be less than total() when there are unreachable fn bodies
+        let src = r#"
+verus! {
+    spec fn used(x: int) -> bool { x > 0 }
+    spec fn unused(x: int) -> bool { x < 0 }
+    exec fn foo(x: u32)
+        requires used(x as int),
+    {
+        let _y = x + 1;
+    }
+}
+"#;
+        let roots: HashSet<String> = ["foo".to_string()].into();
+        let c = analyze_source(src, &roots);
+        assert_eq!(
+            c.total_reachable(),
+            c.spec_reachable() + c.proof_reachable() + c.exec + c.comment + c.blank,
+            "total_reachable() consistency: {:?}", c
+        );
+        assert!(c.spec_fn_unreferenced > 0, "'unused' should be unreferenced: {:?}", c);
+        assert!(c.total_reachable() < c.total(), "reachable total < full total when unreachable fns exist: {:?}", c);
+    }
+
+    #[test]
+    fn test_no_roots_shows_full_totals() {
+        // When roots is empty, spec/proof/total show full (non-reachable-filtered) counts
+        let src = r#"
+verus! {
+    spec fn helper(x: int) -> bool { x > 0 }
+    exec fn foo(x: u32) {
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        // With no roots, all spec fns are "reachable" (all-roots BFS)
+        assert_eq!(c.spec_total(), c.spec_reachable() + c.spec_fn_unreferenced);
+        assert_eq!(c.total(), c.spec_total() + c.proof_total() + c.exec + c.comment + c.blank);
+    }
 }
