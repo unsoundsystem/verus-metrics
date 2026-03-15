@@ -152,7 +152,18 @@ pub fn tally(
             LineAnno::Comment => c.comment += 1,
             LineAnno::NonVerus => {} // not counted in any metric
             LineAnno::Exec => c.exec += 1,
-            LineAnno::ReqEns(_) => c.spec_req_ens += 1,
+            LineAnno::ReqEns(idx) => {
+                let reachable = match fns.get(*idx).map(|f| f.mode) {
+                    Some(Mode::Spec) => spec_reach.contains(idx),
+                    Some(Mode::Proof) => proof_reach.contains(idx),
+                    Some(Mode::Exec) | None => true,
+                };
+                if reachable {
+                    c.spec_req_ens_reachable += 1;
+                } else {
+                    c.spec_req_ens_unreachable += 1;
+                }
+            }
             LineAnno::ProofBlk(_) => c.proof_block += 1,
             LineAnno::FnLine(idx) => match fns.get(*idx).map(|f| f.mode) {
                 Some(Mode::Exec) | None => c.exec += 1,

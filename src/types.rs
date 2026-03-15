@@ -38,7 +38,8 @@ pub enum LineAnno {
 
 #[derive(Default, Debug, Clone)]
 pub struct Counts {
-    pub spec_req_ens: usize,
+    pub spec_req_ens_reachable: usize,
+    pub spec_req_ens_unreachable: usize,
     pub spec_fn_reachable: usize,
     pub spec_fn_unreferenced: usize,
     pub proof_block: usize,
@@ -53,8 +54,12 @@ pub struct Counts {
 }
 
 impl Counts {
+    /// Total requires/ensures lines (reachable + unreachable).
+    pub fn spec_req_ens(&self) -> usize {
+        self.spec_req_ens_reachable + self.spec_req_ens_unreachable
+    }
     pub fn spec_total(&self) -> usize {
-        self.spec_req_ens + self.spec_fn_reachable + self.spec_fn_unreferenced
+        self.spec_req_ens() + self.spec_fn_reachable + self.spec_fn_unreferenced
     }
     pub fn proof_total(&self) -> usize {
         self.proof_block + self.proof_fn_reachable + self.proof_fn_unreferenced
@@ -62,8 +67,22 @@ impl Counts {
     pub fn total(&self) -> usize {
         self.spec_total() + self.proof_total() + self.exec + self.comment + self.blank
     }
+    /// Spec lines reachable from roots: reachable req/ens + reachable spec fn bodies.
+    pub fn spec_reachable(&self) -> usize {
+        self.spec_req_ens_reachable + self.spec_fn_reachable
+    }
+    /// Proof lines reachable from roots: proof blocks (always included, exec reachability
+    /// not tracked) + reachable proof fn bodies.
+    pub fn proof_reachable(&self) -> usize {
+        self.proof_block + self.proof_fn_reachable
+    }
+    /// Total reachable lines (spec* + proof* + exec + comment + blank).
+    pub fn total_reachable(&self) -> usize {
+        self.spec_reachable() + self.proof_reachable() + self.exec + self.comment + self.blank
+    }
     pub fn add(&mut self, other: &Counts) {
-        self.spec_req_ens += other.spec_req_ens;
+        self.spec_req_ens_reachable += other.spec_req_ens_reachable;
+        self.spec_req_ens_unreachable += other.spec_req_ens_unreachable;
         self.spec_fn_reachable += other.spec_fn_reachable;
         self.spec_fn_unreferenced += other.spec_fn_unreferenced;
         self.proof_block += other.proof_block;

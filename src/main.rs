@@ -33,30 +33,15 @@ struct Args {
 // ─── Output ───────────────────────────────────────────────────────────────────
 
 fn print_row(label: &str, c: &Counts, show_reach: bool) {
-    if show_reach {
-        println!(
-            "{:<50} {:>6} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6}",
-            label,
-            c.spec_total(),
-            c.proof_total(),
-            c.exec,
-            c.spec_fn_reachable + c.proof_fn_reachable,
-            c.comment,
-            c.blank,
-            c.total()
-        );
+    let (spec, proof, total) = if show_reach {
+        (c.spec_reachable(), c.proof_reachable(), c.total_reachable())
     } else {
-        println!(
-            "{:<50} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
-            label,
-            c.spec_total(),
-            c.proof_total(),
-            c.exec,
-            c.comment,
-            c.blank,
-            c.total()
-        );
-    }
+        (c.spec_total(), c.proof_total(), c.total())
+    };
+    println!(
+        "{:<50} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
+        label, spec, proof, c.exec, c.comment, c.blank, total
+    );
 }
 
 fn print_detail(c: &Counts) {
@@ -70,7 +55,9 @@ fn print_detail(c: &Counts) {
         c.spec_total(),
         c.spec_total() as f64 / code as f64 * 100.0
     );
-    println!("  requires/ensures:       {:>6}", c.spec_req_ens);
+    println!("  requires/ensures:       {:>6}", c.spec_req_ens());
+    println!("    reachable:            {:>6}", c.spec_req_ens_reachable);
+    println!("    unreferenced:         {:>6}", c.spec_req_ens_unreachable);
     println!("  spec fn bodies:");
     println!("    reachable:            {:>6}", c.spec_fn_reachable);
     println!("    unreferenced:         {:>6}", c.spec_fn_unreferenced);
@@ -167,19 +154,16 @@ fn main() {
 
     let show_reach = !roots.is_empty();
     let header = |show_reach: bool| {
-        if show_reach {
-            println!(
-                "{:<50} {:>6} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6}",
-                "File", "spec", "proof", "exec", "reach", "comment", "blank", "total"
-            );
-            println!("{}", "-".repeat(103));
+        let (spec_label, proof_label) = if show_reach {
+            ("spec*", "proof*")
         } else {
-            println!(
-                "{:<50} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
-                "File", "spec", "proof", "exec", "comment", "blank", "total"
-            );
-            println!("{}", "-".repeat(95));
-        }
+            ("spec", "proof")
+        };
+        println!(
+            "{:<50} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6}",
+            "File", spec_label, proof_label, "exec", "comment", "blank", "total"
+        );
+        println!("{}", "-".repeat(95));
     };
 
     let short_label = |path: &PathBuf| {
@@ -198,7 +182,7 @@ fn main() {
                 print_row(&short_label(path), &result.per_file[i], show_reach);
             }
             if sources.len() > 1 {
-                println!("{}", "-".repeat(if show_reach { 103 } else { 95 }));
+                println!("{}", "-".repeat(95));
                 print_row("TOTAL", &result.total, show_reach);
             }
         } else {
@@ -225,7 +209,7 @@ fn main() {
             total.add(&counts);
         }
         if args.verbose && sources.len() > 1 {
-            println!("{}", "-".repeat(if show_reach { 103 } else { 95 }));
+            println!("{}", "-".repeat(95));
             print_row("TOTAL", &total, show_reach);
         } else if !args.verbose {
             header(show_reach);
@@ -310,7 +294,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 2, "requires+ensures should be spec: {:?}", c);
+        assert!(c.spec_req_ens() >=2, "requires+ensures should be spec: {:?}", c);
         assert_eq!(c.spec_fn_reachable, 0);
         assert_eq!(c.spec_fn_unreferenced, 0);
     }
@@ -333,7 +317,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 1, "ensures line should be spec: {:?}", c);
+        assert!(c.spec_req_ens() >=1, "ensures line should be spec: {:?}", c);
         assert_eq!(c.exec, 0, "fn body must not be exec: {:?}", c);
     }
 
@@ -353,7 +337,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 1, "ensures continuation should be spec: {:?}", c);
+        assert!(c.spec_req_ens() >=1, "ensures continuation should be spec: {:?}", c);
         assert_eq!(c.exec, 0, "no exec expected: {:?}", c);
     }
 
@@ -373,7 +357,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 1, "requires line should be spec");
+        assert!(c.spec_req_ens() >=1, "requires line should be spec");
         assert!(c.spec_fn_reachable > 0, "helper should be reachable: {:?}", c);
         assert_eq!(c.spec_fn_unreferenced, 0);
     }
@@ -841,7 +825,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 1, "requires line should be spec: {:?}", c);
+        assert!(c.spec_req_ens() >=1, "requires line should be spec: {:?}", c);
     }
 
     #[test]
@@ -857,7 +841,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 1, "requires line with block comment should be spec: {:?}", c);
+        assert!(c.spec_req_ens() >=1, "requires line with block comment should be spec: {:?}", c);
     }
 
     // ── print_row / print_detail / Counts::total ─────────────────────────────
@@ -866,7 +850,7 @@ verus! {
     fn test_print_row_no_panic() {
         let mut c = Counts::default();
         c.exec = 10;
-        c.spec_req_ens = 3;
+        c.spec_req_ens_reachable = 3;
         c.proof_fn_reachable = 2;
         c.comment = 1;
         c.blank = 1;
@@ -888,7 +872,7 @@ verus! {
     fn test_print_detail_with_counts() {
         let mut c = Counts::default();
         c.exec = 5;
-        c.spec_req_ens = 2;
+        c.spec_req_ens_reachable = 2;
         c.spec_fn_reachable = 3;
         c.proof_block = 1;
         c.proof_fn_reachable = 4;
@@ -915,7 +899,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 1, "loop invariant should be spec_req_ens: {:?}", c);
+        assert!(c.spec_req_ens() >=1, "loop invariant should be spec_req_ens: {:?}", c);
     }
 
     #[test]
@@ -932,7 +916,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 1, "loop decreases should be spec_req_ens: {:?}", c);
+        assert!(c.spec_req_ens() >=1, "loop decreases should be spec_req_ens: {:?}", c);
     }
 
     #[test]
@@ -961,7 +945,7 @@ verus! {
 "#;
         let c0 = analyze_source(src_no_inv, &HashSet::new());
         let c1 = analyze_source(src_with_inv, &HashSet::new());
-        assert!(c1.spec_req_ens > c0.spec_req_ens, "invariant should increase spec_req_ens");
+        assert!(c1.spec_req_ens() > c0.spec_req_ens(), "invariant should increase spec_req_ens");
         assert_eq!(c1.exec, c0.exec, "invariant should not add to exec: c0={:?} c1={:?}", c0, c1);
     }
 
@@ -978,7 +962,7 @@ verus! {
 }
 "#;
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.spec_req_ens >= 1, "fn sig decreases should be spec_req_ens: {:?}", c);
+        assert!(c.spec_req_ens() >=1, "fn sig decreases should be spec_req_ens: {:?}", c);
     }
 
     // ── calc! { } as proof block ──────────────────────────────────────────────
@@ -1066,7 +1050,7 @@ verus! {
 "#;
         let c = analyze_source(src, &HashSet::new());
         // The ensures clause lines (7 of them) must be spec.
-        assert!(c.spec_req_ens >= 7, "ensures block should be spec: {:?}", c);
+        assert!(c.spec_req_ens() >=7, "ensures block should be spec: {:?}", c);
         // The fn body lines count as proof fn body (not proof_block, since it's a proof fn).
         assert!(
             c.proof_fn_reachable > 0 || c.proof_fn_unreferenced > 0,
@@ -1127,5 +1111,68 @@ verus! {
             c.proof_fn_reachable > 0 || c.proof_fn_unreferenced > 0,
             "proof fn with calc! should count as proof_fn: {:?}", c
         );
+    }
+
+    // ── spec_req_ens reachable/unreachable split ──────────────────────────────
+
+    #[test]
+    fn test_req_ens_reachable_exec_owner() {
+        // requires/ensures of an exec fn are always reachable (exec fn is the root)
+        let src = r#"
+verus! {
+    exec fn foo(x: u32) -> u32
+        requires x > 0,
+        ensures (return_value: u32) => return_value > 0,
+    {
+        x
+    }
+}
+"#;
+        let roots: HashSet<String> = ["foo".to_string()].into();
+        let c = analyze_source(src, &roots);
+        assert!(c.spec_req_ens_reachable >= 2, "exec fn req/ens always reachable: {:?}", c);
+        assert_eq!(c.spec_req_ens_unreachable, 0);
+    }
+
+    #[test]
+    fn test_req_ens_unreachable_spec_fn() {
+        // requires of an unreachable spec fn should be unreachable
+        let src = r#"
+verus! {
+    spec fn unused(x: int) -> bool
+        requires x > 0,
+    {
+        x > 0
+    }
+    exec fn bar() {
+    }
+}
+"#;
+        let roots: HashSet<String> = ["bar".to_string()].into();
+        let c = analyze_source(src, &roots);
+        // unused is not reachable from bar, so its requires line is unreachable
+        assert!(c.spec_req_ens_unreachable >= 1, "unreachable spec fn req_ens should be unreachable: {:?}", c);
+    }
+
+    #[test]
+    fn test_spec_reachable_sum() {
+        // spec_reachable() == spec_req_ens_reachable + spec_fn_reachable
+        let src = r#"
+verus! {
+    spec fn helper(x: int) -> bool { x > 0 }
+    exec fn foo(x: u32)
+        requires helper(x as int),
+    {
+    }
+}
+"#;
+        let roots: HashSet<String> = ["foo".to_string()].into();
+        let c = analyze_source(src, &roots);
+        assert_eq!(
+            c.spec_reachable(),
+            c.spec_req_ens_reachable + c.spec_fn_reachable,
+            "spec_reachable() must equal sum of parts: {:?}", c
+        );
+        assert!(c.spec_reachable() > 0, "should have some reachable spec lines: {:?}", c);
     }
 }
