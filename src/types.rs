@@ -31,6 +31,8 @@ pub enum LineAnno {
     NonVerus,
     ReqEns(usize),
     ProofBlk(Option<usize>),
+    /// Lines inside `spec { }` override blocks within exec function bodies.
+    SpecBlk(Option<usize>),
     FnLine(usize),
 }
 
@@ -40,6 +42,7 @@ pub enum LineAnno {
 pub struct Counts {
     pub spec_req_ens_reachable: usize,
     pub spec_req_ens_unreachable: usize,
+    pub spec_block: usize,
     pub spec_fn_reachable: usize,
     pub spec_fn_unreferenced: usize,
     pub proof_block: usize,
@@ -59,7 +62,7 @@ impl Counts {
         self.spec_req_ens_reachable + self.spec_req_ens_unreachable
     }
     pub fn spec_total(&self) -> usize {
-        self.spec_req_ens() + self.spec_fn_reachable + self.spec_fn_unreferenced
+        self.spec_req_ens() + self.spec_block + self.spec_fn_reachable + self.spec_fn_unreferenced
     }
     pub fn proof_total(&self) -> usize {
         self.proof_block + self.proof_fn_reachable + self.proof_fn_unreferenced
@@ -67,9 +70,10 @@ impl Counts {
     pub fn total(&self) -> usize {
         self.spec_total() + self.proof_total() + self.exec + self.comment + self.blank
     }
-    /// Spec lines reachable from roots: reachable req/ens + reachable spec fn bodies.
+    /// Spec lines reachable from roots: reachable req/ens + spec blocks (always included,
+    /// exec reachability not tracked) + reachable spec fn bodies.
     pub fn spec_reachable(&self) -> usize {
-        self.spec_req_ens_reachable + self.spec_fn_reachable
+        self.spec_req_ens_reachable + self.spec_block + self.spec_fn_reachable
     }
     /// Proof lines reachable from roots: proof blocks (always included, exec reachability
     /// not tracked) + reachable proof fn bodies.
@@ -83,6 +87,7 @@ impl Counts {
     pub fn add(&mut self, other: &Counts) {
         self.spec_req_ens_reachable += other.spec_req_ens_reachable;
         self.spec_req_ens_unreachable += other.spec_req_ens_unreachable;
+        self.spec_block += other.spec_block;
         self.spec_fn_reachable += other.spec_fn_reachable;
         self.spec_fn_unreferenced += other.spec_fn_unreferenced;
         self.proof_block += other.proof_block;

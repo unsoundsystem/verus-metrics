@@ -21,6 +21,8 @@ pub struct State {
     pub raw_string_hashes: Option<usize>,
     /// verus_depth at entry of current proof{} block (None = not in one)
     pub proof_block_depth: Option<i32>,
+    /// verus_depth at entry of current spec{} block (None = not in one)
+    pub spec_block_depth: Option<i32>,
     /// true when inside an assert/assert_by/assert_forall_by statement in exec context,
     /// before it resolves to `;` or `by { }`
     pub in_assert_stmt: bool,
@@ -47,6 +49,7 @@ impl State {
             in_string: false,
             raw_string_hashes: None,
             proof_block_depth: None,
+            spec_block_depth: None,
             in_assert_stmt: false,
             assert_paren_depth: 0,
             req_ens_paren_depth: 0,
@@ -64,6 +67,10 @@ impl State {
 
     pub fn is_in_proof_block(&self) -> bool {
         self.proof_block_depth.is_some()
+    }
+
+    pub fn is_in_spec_block(&self) -> bool {
+        self.spec_block_depth.is_some()
     }
 }
 

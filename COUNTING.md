@@ -2,7 +2,7 @@
 
 ## Spec lines
 
-### requires/ensures/invariant/decreases in exec fn
+### requires/ensures/invariant/decreases in fn signatures and loop bodies
 
 Lines starting with any of the following keywords are counted as **spec** (`spec_req_ens`):
 
@@ -11,6 +11,10 @@ Lines starting with any of the following keywords are counted as **spec** (`spec
 - `invariant` / `decreases` inside a loop body — loop invariants and variants
 
 > Loop `invariant` / `decreases` lines are classified as spec even outside a fn signature section (`pending.is_none()`).
+
+### spec {} blocks inside exec fn bodies
+
+Lines inside `spec { ... }` override blocks within exec function bodies are counted as **spec** (`spec_block`). This covers ghost code and spec-mode expressions embedded in exec functions.
 
 ### spec fn / proof fn bodies
 
@@ -45,11 +49,26 @@ Multi-line `assert(` conditions (where `)` appears on a later line) are also ful
 
 ### exec fn bodies
 
-All lines of an exec fn definition minus any spec or proof lines.
+Lines inside the body of an exec fn (between `{` and `}`), excluding any lines classified as spec or proof. Exec fn signature lines (parameter types, return types, where clauses) are **not** counted as exec — they are declarations, not executable code.
+
+### struct definitions
+
+`struct` definitions at the top level inside `verus! { }` are counted as exec.
 
 ### proof fn / spec fn
 
 Zero — their bodies are counted as spec or proof respectively.
+
+---
+
+## Not counted (NonVerus)
+
+The following are not counted in any metric:
+
+- Code outside the `verus! { }` macro (use imports, module declarations, etc.)
+- The `verus! {` and `}` delimiter lines themselves
+- `enum`, `impl`, `type`, `use` at the top level inside `verus! { }`
+- Exec fn signature lines (parameter types, return types, where clauses)
 
 ---
 
@@ -73,4 +92,5 @@ All of the following modifier patterns are supported. Tokens before `spec fn` / 
 ## Known limitations
 
 - `calc!` or `proof` with `{` on the next line (e.g. `calc!\n{`) is not supported.
-- Code outside the `verus!` macro is always classified as Exec.
+- `spec` with `{` on the next line (e.g. `spec\n{`) is not supported.
+- Exec fn reachability is not tracked; when `--roots` is specified, exec lines and proof blocks are shown unfiltered.

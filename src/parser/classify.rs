@@ -109,6 +109,7 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
     // Track the fn context active during this line (even if it opens+closes on same line)
     let mut line_fn_idx: Option<usize> = state.current_fn_idx();
     let mut line_had_proof_blk = false;
+    let mut line_had_spec_blk = false;
     // Continuation of a multi-line assert statement → whole line is proof
     if state.in_assert_stmt {
         line_had_proof_blk = true;
@@ -239,7 +240,33 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
             continue;
         }
 
-        // ── Inside verus!, not in proof block ──
+        // ── Inside spec block ──
+        if state.is_in_spec_block() {
+            line_had_spec_blk = true;
+            line_fn_idx = line_fn_idx.or_else(|| state.current_fn_idx());
+            match chars[i] {
+                '{' => {
+                    state.verus_depth += 1;
+                    has_code = true;
+                }
+                '}' => {
+                    state.verus_depth -= 1;
+                    if state.spec_block_depth.map_or(false, |d| state.verus_depth < d) {
+                        state.spec_block_depth = None;
+                    }
+                    has_code = true;
+                }
+                c => {
+                    if !c.is_whitespace() {
+                        has_code = true;
+                    }
+                }
+            }
+            i += 1;
+            continue;
+        }
+
+        // ── Inside verus!, not in proof/spec block ──
         line_fn_idx = line_fn_idx.or_else(|| state.current_fn_idx());
         let rest: String = chars[i..].iter().collect();
 
@@ -334,13 +361,15 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
             }
         }
 
-        // spec { } override block
+        // spec { } override block inside exec fn body → spec block
         if rest.starts_with("spec {") || rest.starts_with("spec{") {
             if state.pending.is_none() {
                 let brace_pos = rest.find('{').unwrap();
-                state.mode_stack.push((Mode::Spec, None));
-                state.verus_depth += 1;
                 i += brace_pos + 1;
+                state.verus_depth += 1;
+                state.spec_block_depth = Some(state.verus_depth);
+                line_had_spec_blk = true;
+                line_fn_idx = line_fn_idx.or_else(|| state.current_fn_idx());
                 has_code = true;
                 continue;
             }
@@ -483,8 +512,20 @@ pub fn classify_line(line: &str, state: &mut State, fns: &mut Vec<FnInfo>) -> Li
         return LineAnno::ProofBlk(fn_idx);
     }
 
+    if line_had_spec_blk || state.is_in_spec_block() {
+        let fn_idx = line_fn_idx.or_else(|| state.current_fn_idx());
+        return LineAnno::SpecBlk(fn_idx);
+    }
+
     if let Some(ref p) = state.pending {
-        return LineAnno::FnLine(p.fn_idx);
+        // Signature lines of spec/proof fns are part of their specification;
+        // exec fn signature lines (params, return type, where clauses) are declarations,
+        // not executable code.
+        return if p.mode == Mode::Exec {
+            LineAnno::NonVerus
+        } else {
+            LineAnno::FnLine(p.fn_idx)
+        };
     }
 
     match line_fn_idx.or_else(|| state.current_fn_idx()) {

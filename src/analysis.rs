@@ -10,6 +10,7 @@ fn shift_anno(anno: LineAnno, offset: usize) -> LineAnno {
         LineAnno::FnLine(idx) => LineAnno::FnLine(idx + offset),
         LineAnno::ReqEns(idx) => LineAnno::ReqEns(idx + offset),
         LineAnno::ProofBlk(Some(idx)) => LineAnno::ProofBlk(Some(idx + offset)),
+        LineAnno::SpecBlk(Some(idx)) => LineAnno::SpecBlk(Some(idx + offset)),
         other => other,
     }
 }
@@ -165,6 +166,7 @@ pub fn tally(
                 }
             }
             LineAnno::ProofBlk(_) => c.proof_block += 1,
+            LineAnno::SpecBlk(_) => c.spec_block += 1,
             LineAnno::FnLine(idx) => match fns.get(*idx).map(|f| f.mode) {
                 Some(Mode::Exec) | None => c.exec += 1,
                 Some(Mode::Spec) => {

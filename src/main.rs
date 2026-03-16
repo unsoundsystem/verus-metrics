@@ -58,6 +58,7 @@ fn print_detail(c: &Counts) {
     println!("  requires/ensures:       {:>6}", c.spec_req_ens());
     println!("    reachable:            {:>6}", c.spec_req_ens_reachable);
     println!("    unreferenced:         {:>6}", c.spec_req_ens_unreachable);
+    println!("  spec blocks:            {:>6}", c.spec_block);
     println!("  spec fn bodies:");
     println!("    reachable:            {:>6}", c.spec_fn_reachable);
     println!("    unreferenced:         {:>6}", c.spec_fn_unreferenced);
@@ -783,7 +784,7 @@ verus! {
 
     #[test]
     fn test_spec_override_block() {
-        // `spec { }` override block inside exec fn — covers the spec{} path in classify.
+        // `spec { }` override block inside exec fn — lines inside should be spec, not exec.
         let src = r#"
 verus! {
     exec fn foo(n: u32) -> bool {
@@ -791,9 +792,47 @@ verus! {
     }
 }
 "#;
-        // We just verify it parses without panic and produces some counts.
         let c = analyze_source(src, &HashSet::new());
-        assert!(c.total() > 0, "spec override block should produce counts: {:?}", c);
+        assert!(c.spec_block > 0, "spec block should produce spec_block count: {:?}", c);
+        assert_eq!(c.exec, 2, "only fn body braces should be exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_exec_fn_signature_lines() {
+        // Multi-line exec fn signatures: params/return type are declarations, not exec code.
+        let src = r#"
+verus! {
+    exec fn bar(
+        x: u32,
+        y: u32,
+        z: u32,
+    ) -> u32
+    {
+        x + y + z
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        // Only body lines (`{`, `x + y + z`, `}`) should be exec; signature lines are NonVerus.
+        assert_eq!(c.exec, 3, "only body lines should be exec: {:?}", c);
+    }
+
+    #[test]
+    fn test_spec_block_inside_exec_fn() {
+        // Multi-line spec {} inside exec fn — these lines should be spec, not exec.
+        let src = r#"
+verus! {
+    exec fn foo(n: u32) -> bool {
+        spec {
+            let ghost_val = n as int;
+            ghost_val > 0
+        }
+    }
+}
+"#;
+        let c = analyze_source(src, &HashSet::new());
+        assert!(c.spec_block >= 4, "spec block lines should be spec: {:?}", c);
+        assert_eq!(c.exec, 2, "only fn body braces should be exec: {:?}", c);
     }
 
     #[test]
